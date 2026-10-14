@@ -1,0 +1,5 @@
+name: astrbot_plugin_ehentai_download
+display_name: EH 画廊下载
+desc: 下载 E-Hentai / ExHentai 画廊并打包 ZIP，支持代理、Cookie、任务查询和取消。
+version: v1.0.2
+author: renmu

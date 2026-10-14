@@ -1,0 +1,111 @@
+{
+  "save_path": {
+    "description": "保存路径",
+    "type": "string",
+    "default": "",
+    "hint": "ZIP 的保存根目录，下载完成后自动清理临时画廊子目录，仅发送文本提示。留空使用 data/plugin_data/astrbot_plugin_ehentai_download/downloads；支持绝对路径和 ~，相对路径以 AstrBot 工作目录为基准。Docker 中填写容器内的路径。修改后重新加载插件。"
+  },
+  "network_proxy": {
+    "description": "网络与代理",
+    "type": "object",
+    "items": {
+      "proxy_mode": {
+        "description": "代理模式",
+        "type": "string",
+        "default": "system",
+        "options": ["system", "custom", "none"],
+        "hint": "system 使用 HTTP_PROXY/HTTPS_PROXY/ALL_PROXY 等环境变量；custom 使用下方地址；none 禁用环境代理。"
+      },
+      "proxy_url": {
+        "description": "自定义代理地址",
+        "type": "string",
+        "default": "",
+        "hint": "仅 custom 生效，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:7890；Docker 中 127.0.0.1 指向容器自身。"
+      }
+    }
+  },
+  "cookie": {
+    "description": "账号 Cookie",
+    "type": "string",
+    "default": "",
+    "secret": true,
+    "hint": "填 Cookie 请求头的值，格式 ipb_member_id=...; ipb_pass_hash=...; igneous=...。ExHentai 必须填写且账号本身需要访问权限。修改后重新加载插件。"
+  },
+  "admin_only": {
+    "description": "限制为管理员或白名单用户",
+    "type": "bool",
+    "default": true
+  },
+  "allowed_users": {
+    "description": "允许使用的用户 ID",
+    "type": "list",
+    "default": [],
+    "hint": "admin_only 开启时，管理员和这些用户可以使用；关闭时允许所有用户。用户 ID 以字符串填写。"
+  },
+  "download": {
+    "description": "下载设置",
+    "type": "object",
+    "items": {
+      "original": {
+        "description": "优先下载原图",
+        "type": "bool",
+        "default": false,
+        "hint": "启用后优先使用 Download original 链接；页面未提供原图链接时使用展示图。原图链接下载失败时会报错，不会静默降级。"
+      },
+      "timeout": {
+        "description": "网络请求超时（秒）",
+        "type": "int",
+        "default": 45,
+        "hint": "范围 1–300；这是每次网络读写的超时。"
+      },
+      "retries": {
+        "description": "失败后的重试次数",
+        "type": "int",
+        "default": 2,
+        "hint": "范围 0–5；网络错误和临时服务器错误会退避重试，访问拒绝或额度耗尽直接停止。"
+      },
+      "interval": {
+        "description": "页面下载间隔（秒）",
+        "type": "float",
+        "default": 1.0,
+        "hint": "范围 0–60；图片按顺序下载，避免密集请求。"
+      },
+      "max_pages": {
+        "description": "单画廊页数上限",
+        "type": "int",
+        "default": 500,
+        "hint": "范围 1–2000；超过上限会在下载图片前停止。"
+      },
+      "max_image_mb": {
+        "description": "单张图片大小上限（MiB）",
+        "type": "int",
+        "default": 64,
+        "hint": "范围 1–1024。"
+      },
+      "max_gallery_mb": {
+        "description": "单画廊图片总大小上限（MiB）",
+        "type": "int",
+        "default": 512,
+        "hint": "范围 1–10240；不含 ZIP 目录和元数据开销。"
+      },
+      "max_send_mb": {
+        "description": "ZIP 手动发送上限（MiB）",
+        "type": "int",
+        "default": 100,
+        "hint": "范围 1–10240；仅用于 /eh发送 命令。下载完成后仅发送文本提示。实际上传还受聊天平台限制。"
+      },
+      "concurrent_tasks": {
+        "description": "同时下载的画廊数",
+        "type": "int",
+        "default": 1,
+        "hint": "范围 1–3；建议保持 1。修改配置后重新加载插件。"
+      },
+      "max_pending_tasks": {
+        "description": "未完成任务上限",
+        "type": "int",
+        "default": 5,
+        "hint": "范围 1–20；包含运行中和排队中的任务。"
+      }
+    }
+  }
+}
