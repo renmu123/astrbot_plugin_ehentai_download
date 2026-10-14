@@ -67,7 +67,10 @@ def load_plugin(root):
     modules["astrbot.api"].AstrBotConfig = dict
     modules["astrbot.api"].logger = FakeLogger()
     modules["astrbot.api.event"].AstrMessageEvent = FakeEvent
-    modules["astrbot.api.event"].filter = types.SimpleNamespace(command=lambda *args, **kwargs: lambda function: function)
+    modules["astrbot.api.event"].filter = types.SimpleNamespace(
+        command=lambda *args, **kwargs: lambda function: function,
+        llm_tool=lambda *args, **kwargs: lambda function: function,
+    )
     modules["astrbot.api.message_components"].File = FakeFile
     modules["astrbot.api.star"].Star = FakeStar
     modules["astrbot.api.star"].Context = object
@@ -266,6 +269,92 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.event.sent), 1)
         self.assertIn("发送上限", self.event.sent[0])
         self.assertTrue(job.result.archive.is_file())
+
+    async def test_tool_submit_returns_immediately_and_completion_is_text(self):
+        self.plugin.downloader = FakeDownloader(self.root, block=True)
+        result = await asyncio.wait_for(self.plugin.download_tool(
+            self.event, "https://e-hentai.org/g/42/abcdef1234/",
+        ), 1)
+        job = next(iter(self.plugin.jobs.values()))
+        self.assertIn(job.id, result)
+        self.assertIn("已提交", result)
+        self.assertFalse(job.task.done())
+        self.assertFalse(self.event.stopped)
+        self.assertEqual(self.event.sent, [])
+        await self.plugin.downloader.started.wait()
+        status = await self.plugin.status_tool(self.event, job.id)
+        self.assertIn("下载图片", status)
+        self.assertNotIn("已完成", status)
+        self.plugin.downloader.release.set()
+        await job.task
+        self.assertIn("已完成", await self.plugin.status_tool(self.event))
+        self.assertEqual(len(self.event.sent), 1)
+        self.assertIsInstance(self.event.sent[0], str)
+        self.assertIn("下载完成", self.event.sent[0])
+        self.assertFalse(self.event.stopped)
+
+    async def test_tools_enforce_permissions_and_accept_whitelist(self):
+        user = FakeEvent(sender="user", admin=False)
+        url = "https://e-hentai.org/g/42/abcdef1234/"
+        self.assertIn("白名单", await self.plugin.download_tool(user, url))
+        self.assertIn("权限", await self.plugin.status_tool(user))
+        self.assertIn("权限", await self.plugin.cancel_tool(user, "unknown"))
+        self.assertEqual(self.plugin.jobs, {})
+        self.plugin.config["allowed_users"] = ["user"]
+        result = await self.plugin.download_tool(user, url)
+        job = next(iter(self.plugin.jobs.values()))
+        self.assertIn(job.id, result)
+        await job.task
+        self.assertIn("已完成", await self.plugin.status_tool(user, job.id))
+        self.assertNotIn(str(self.plugin.root), user.sent[0])
+
+    async def test_tools_share_command_validation_duplicates_and_queue(self):
+        self.assertIn("HTTPS", await self.plugin.download_tool(self.event, "https://example.com/g/42/token/"))
+        self.assertEqual(self.plugin.jobs, {})
+        self.plugin.downloader = FakeDownloader(self.root, block=True)
+        self.plugin.max_pending = 1
+        await self.submit()
+        self.assertIn("已有下载任务", await self.plugin.download_tool(
+            self.event, "https://e-hentai.org/g/42/abcdef1234/",
+        ))
+        self.assertIn("未完成任务", await self.plugin.download_tool(
+            self.event, "https://e-hentai.org/g/43/abcdef1234/",
+        ))
+        self.assertEqual(len(self.plugin.jobs), 1)
+        self.plugin.closing = True
+        self.assertIn("正在停止", await self.plugin.download_tool(
+            self.event, "https://e-hentai.org/g/44/abcdef1234/",
+        ))
+
+    async def test_tool_status_and_cancel_respect_user_and_session(self):
+        self.plugin.config["admin_only"] = False
+        self.plugin.downloader = FakeDownloader(self.root, block=True)
+        owner = FakeEvent(sender="alice", admin=False)
+        await self.plugin.download_tool(owner, "https://e-hentai.org/g/42/abcdef1234/")
+        await self.plugin.downloader.started.wait()
+        job = next(iter(self.plugin.jobs.values()))
+        for event in (FakeEvent(sender="bob", admin=False), FakeEvent(origin="test:group:2")):
+            self.assertNotIn(job.id, await self.plugin.status_tool(event, job.id))
+            self.assertIn("权限", await self.plugin.cancel_tool(event, job.id))
+            self.assertFalse(job.task.done())
+            self.assertFalse(event.stopped)
+        self.assertIn(job.id, await self.plugin.status_tool(self.event, job.id))
+        result = await self.plugin.cancel_tool(owner, job.id)
+        self.assertIn("取消", result)
+        self.assertEqual(job.stage, "已取消")
+        self.assertTrue(job.task.done())
+        self.assertEqual(self.plugin.downloader.active, 0)
+        self.assertIn("已结束", await self.plugin.cancel_tool(owner, job.id))
+        self.assertFalse(owner.stopped)
+
+    async def test_tool_cancel_before_job_starts(self):
+        await self.plugin.download_tool(self.event, "https://e-hentai.org/g/42/abcdef1234/")
+        job = next(iter(self.plugin.jobs.values()))
+        result = await self.plugin.cancel_tool(self.event, job.id)
+        self.assertIn(job.id, result)
+        self.assertEqual(job.stage, "已取消")
+        self.assertTrue(job.task.cancelled())
+        self.assertFalse(self.event.stopped)
 
     async def test_terminate_cancels_every_job_and_suppresses_notifications(self):
         self.plugin.downloader = FakeDownloader(self.root, block=True)

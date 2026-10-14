@@ -20,6 +20,7 @@ HELP = """EH 下载插件
 /eh发送 <任务ID>  重新发送已完成的 ZIP
 /eh帮助  显示帮助
 下载完成后将 ZIP 保存到配置的保存目录，清理临时图片，仅发送文本提示。
+支持在 AI 对话中请求下载、查询进度和取消任务。
 默认仅管理员可用，可在配置中添加用户白名单。"""
 
 
@@ -133,31 +134,23 @@ class EHentaiDownloadPlugin(Star):
             job.stage, job.error = "失败", "下载发生异常，请检查磁盘空间、配置及依赖。"
             await self.notify(event, f"任务 {job.id}：{job.error}")
 
-    @filter.command("eh下载", alias={"ehdl"})
-    async def download(self, event: AstrMessageEvent, url: str = ""):
-        """下载指定 E-Hentai / ExHentai 画廊，完成后保存 ZIP 并发送文本提示。"""
-        event.stop_event()
+    def submit_download(self, event: AstrMessageEvent, url: str) -> str:
+        """Submit from either a command or an LLM tool without stopping the event."""
         if not self.allowed(event):
-            yield event.plain_result("仅管理员或配置白名单中的用户可使用下载插件。")
-            return
+            return "仅管理员或配置白名单中的用户可使用下载插件。"
         if self.closing:
-            yield event.plain_result("插件正在停止，请稍后重试。")
-            return
+            return "插件正在停止，请稍后重试。"
         if not url:
-            yield event.plain_result(HELP)
-            return
+            return HELP
         try:
             gallery = Gallery.parse(url)
         except DownloadError as exc:
-            yield event.plain_result(str(exc))
-            return
+            return str(exc)
         active = [job for job in self.jobs.values() if job.stage in ACTIVE]
         if any(job.gallery == gallery for job in active):
-            yield event.plain_result("该画廊已有下载任务，请等待完成。")
-            return
+            return "该画廊已有下载任务，请等待完成。"
         if len(active) >= self.max_pending:
-            yield event.plain_result(f"已有 {self.max_pending} 个未完成任务，请稍后再提交。")
-            return
+            return f"已有 {self.max_pending} 个未完成任务，请稍后再提交。"
         # Bound in-memory task history; files remain in the plugin data directory.
         for key in list(self.jobs):
             if len(self.jobs) < 100:
@@ -167,34 +160,80 @@ class EHentaiDownloadPlugin(Star):
         job = Job(uuid4().hex[:12], gallery, str(event.get_sender_id()), event.unified_msg_origin)
         self.jobs[job.id] = job
         job.task = asyncio.create_task(self.run_job(event, job), name=f"eh-download-{job.id}")
-        yield event.plain_result(f"已提交下载任务 {job.id}。用 /eh任务 {job.id} 查看进度，/eh取消 {job.id} 取消。")
+        return f"已提交下载任务 {job.id}。用 /eh任务 {job.id} 查看进度，/eh取消 {job.id} 取消。"
 
-    @filter.command("eh任务", alias={"ehstatus"})
-    async def status(self, event: AstrMessageEvent, job_id: str = ""):
-        """查询下载任务；不填 ID 时展示当前会话最近的任务。"""
-        event.stop_event()
+    def describe_jobs(self, event: AstrMessageEvent, job_id: str = "") -> str:
         if not self.allowed(event):
-            yield event.plain_result("你没有使用下载插件的权限。")
-            return
+            return "你没有使用下载插件的权限。"
         jobs = [job for job in self.jobs.values() if self.visible(event, job) and (not job_id or job.id == job_id)]
-        yield event.plain_result("\n\n".join(job.describe() for job in jobs[-10:]) or "没有找到可查看的任务（任务记录在重启后清空）。")
+        return "\n\n".join(job.describe() for job in jobs[-10:]) or "没有找到可查看的任务（任务记录在重启后清空）。"
 
-    @filter.command("eh取消", alias={"ehcancel"})
-    async def cancel(self, event: AstrMessageEvent, job_id: str):
-        """取消当前会话中有权限管理的下载任务。"""
-        event.stop_event()
+    async def cancel_download(self, event: AstrMessageEvent, job_id: str) -> str:
         job = self.jobs.get(job_id)
         if not self.allowed(event) or job is None or not self.visible(event, job):
-            yield event.plain_result("任务不存在或你没有操作权限。")
+            return "任务不存在或你没有操作权限。"
         elif job.task is None or job.task.done():
-            yield event.plain_result("任务已结束。")
+            return "任务已结束。"
         else:
             job.task.cancel()
             # Wait for file handles and the gallery slot to be released before permitting a new job.
             await asyncio.gather(job.task, return_exceptions=True)
             # Cancelling a task before its first step bypasses its exception handler.
             job.stage = "已取消"
-            yield event.plain_result(f"已请求取消任务 {job.id}。")
+            return f"已请求取消任务 {job.id}。"
+
+    @filter.command("eh下载", alias={"ehdl"})
+    async def download(self, event: AstrMessageEvent, url: str = ""):
+        """下载指定 E-Hentai / ExHentai 画廊，完成后保存 ZIP 并发送文本提示。"""
+        event.stop_event()
+        yield event.plain_result(self.submit_download(event, url))
+
+    @filter.command("eh任务", alias={"ehstatus"})
+    async def status(self, event: AstrMessageEvent, job_id: str = ""):
+        """查询下载任务；不填 ID 时展示当前会话最近的任务。"""
+        event.stop_event()
+        yield event.plain_result(self.describe_jobs(event, job_id))
+
+    @filter.command("eh取消", alias={"ehcancel"})
+    async def cancel(self, event: AstrMessageEvent, job_id: str):
+        """取消当前会话中有权限管理的下载任务。"""
+        event.stop_event()
+        yield event.plain_result(await self.cancel_download(event, job_id))
+
+    @filter.llm_tool(name="ehentai_download")
+    async def download_tool(self, event: AstrMessageEvent, url: str) -> str:
+        """用户请求下载 E-Hentai 或 ExHentai 画廊时，提交后台下载任务。
+
+        立即返回提交结果，提交成功不代表下载完成；请向用户告知任务 ID。
+        完成后 ZIP 保存到配置目录，自动清理临时图片，并在当前会话发送文本提示，不发送文件。
+        查询进度请使用 ehentai_download_status，不要重复提交或循环轮询。
+
+        Args:
+            url(string): 用户提供的完整 HTTPS 画廊链接，格式 https://e-hentai.org/g/编号/令牌/，也支持 exhentai.org。缺少链接时先向用户询问，不要编造。
+        """
+        return self.submit_download(event, url)
+
+    @filter.llm_tool(name="ehentai_download_status")
+    async def status_tool(self, event: AstrMessageEvent, job_id: str = "") -> str:
+        """用户询问 EH 画廊下载进度或结果时，查询当前会话中有权限查看的任务。
+
+        仅按返回的实际阶段报告结果，不要将排队或下载中说成完成，也不要循环轮询。
+
+        Args:
+            job_id(string): 下载工具返回的任务 ID；留空或省略时列出当前会话最近最多十个可见任务。
+        """
+        return self.describe_jobs(event, job_id)
+
+    @filter.llm_tool(name="ehentai_download_cancel")
+    async def cancel_tool(self, event: AstrMessageEvent, job_id: str) -> str:
+        """用户请求取消 EH 画廊下载时，取消当前会话中有权限管理的指定任务。
+
+        已完整下载的图片会保留，之后可重新提交相同链接续下。
+
+        Args:
+            job_id(string): 要取消的任务 ID，使用下载或查询工具返回的真实 ID；不明确时先查询任务。
+        """
+        return await self.cancel_download(event, job_id)
 
     @filter.command("eh发送", alias={"ehfile"})
     async def resend(self, event: AstrMessageEvent, job_id: str):
